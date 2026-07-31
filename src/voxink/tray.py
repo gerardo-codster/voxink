@@ -2,7 +2,7 @@
 
 Provides a menu-bar icon (macOS) / system tray icon (Windows) to control
 recording without the CLI. Start/stop recording, select transcription model,
-view sessions and transcription progress, open the recordings folder, and quit.
+view conversations and transcription progress, reprocess transcriptions, and quit.
 
 Uses pystray for cross-platform tray support:
 - macOS: NSStatusItem (menu bar)
@@ -36,8 +36,8 @@ AVAILABLE_MODELS = [
     ("large-v3", "~3 GB — más lento, calidad excelente"),
 ]
 
-# Max sessions to show in the menu
-MAX_SESSIONS_IN_MENU = 10
+# Max conversations to show in the menu
+MAX_CONVERSATIONS_IN_MENU = 10
 
 
 def _create_icon_image(
@@ -59,7 +59,6 @@ def _create_icon_image(
     elif transcribing:
         # Orange circle with "T" text indicator
         draw.ellipse([4, 4, size - 4, size - 4], fill=(230, 150, 30, 255))
-        # Simple "T" shape for "transcribing"
         cx, cy = size // 2, size // 2
         draw.rectangle([cx - 10, cy - 12, cx + 10, cy - 8], fill=(255, 255, 255, 255))
         draw.rectangle([cx - 2, cy - 8, cx + 2, cy + 12], fill=(255, 255, 255, 255))
@@ -73,8 +72,8 @@ def _create_icon_image(
     return img
 
 
-def _get_session_info(session_dir: Path) -> dict:
-    """Get info about a session for display in the menu."""
+def _get_conversation_info(session_dir: Path) -> dict:
+    """Get info about a conversation for display in the menu."""
     meta_path = session_dir / "meta.json"
     transcript_path = session_dir / "transcript.json"
     transcribe_log = session_dir / "transcribe.log"
@@ -84,15 +83,13 @@ def _get_session_info(session_dir: Path) -> dict:
     # Determine status
     if transcript_path.exists():
         info["status"] = "transcribed"
-        # Count segments
         try:
             data = json.loads(transcript_path.read_text(encoding="utf-8"))
-            seg_count = len(data.get("segments", []))
-            info["segments"] = seg_count
+            info["segments"] = len(data.get("segments", []))
+            info["model_used"] = data.get("model", "?")
         except Exception:
             pass
     elif transcribe_log.exists():
-        # Check if it's currently being processed (log exists but no transcript)
         log_content = transcribe_log.read_text(encoding="utf-8")
         if "done —" in log_content or "failed" in log_content:
             info["status"] = "failed"
@@ -133,8 +130,8 @@ class TrayApp:
         self._session: RecordingSession | None = None
         self._recording = False
         self._transcribing = False
-        self._transcribing_session: str = ""  # Name of session being transcribed
-        self._mic_enabled = True  # Toggle: record mic or only system audio
+        self._transcribing_session: str = ""
+        self._mic_enabled = True
         self._elapsed_str = ""
         self._transcription_status = ""
         self._ticker_thread: threading.Thread | None = None
@@ -155,8 +152,7 @@ class TrayApp:
 
     def _build_menu(self) -> pystray.Menu:
         """Build the context menu."""
-        # Build sessions submenu items
-        sessions_items = self._get_sessions_menu_items()
+        conversations_items = self._get_conversations_menu_items()
 
         return pystray.Menu(
             pystray.MenuItem(
@@ -178,8 +174,8 @@ class TrayApp:
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
-                "Sessions",
-                pystray.Menu(*sessions_items),
+                "Recordings",
+                pystray.Menu(*conversations_items),
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
@@ -211,20 +207,23 @@ class TrayApp:
             ),
         )
 
-    def _get_sessions_menu_items(self) -> list:
-        """Build session menu items for the Sessions submenu."""
-        sessions = self._get_recent_sessions()
+    def _get_conversations_menu_items(self) -> list:
+        """Build conversation menu items with submenus for each conversation."""
+        conversations = self._get_recent_conversations()
 
-        if not sessions:
+        if not conversations:
             return [pystray.MenuItem("No recordings yet", action=None, enabled=False)]
 
         items = []
-        for info in sessions:
+        for info in conversations:
             # Status icon
             status = info["status"]
-            if status == "transcribed":
+            is_current = info["name"] == self._transcribing_session
+            if is_current:
+                icon_str = "⏳"
+            elif status == "transcribed":
                 icon_str = "✓"
-            elif status == "processing" or info["name"] == self._transcribing_session:
+            elif status == "processing":
                 icon_str = "⏳"
             elif status == "failed":
                 icon_str = "✗"
@@ -235,81 +234,66 @@ class TrayApp:
             duration = info.get("duration", "?")
             segments = info.get("segments")
             label = f"{icon_str} {info['name']} ({duration})"
-            if segments is not None:
-                label += f" — {segments} seg"
-            elif info["name"] == self._transcribing_session:
+            if is_current:
                 label += " — transcribing..."
+            elif segments is not None:
+                model_used = info.get("model_used", "")
+                label += f" — {segments} seg"
+                if model_used:
+                    label += f" [{model_used}]"
 
+            # Each conversation gets a submenu with actions
+            conv_submenu = self._build_conversation_submenu(info)
             items.append(
-                pystray.MenuItem(
-                    label,
-                    self._make_session_opener(info["path"]),
-                )
+                pystray.MenuItem(label, pystray.Menu(*conv_submenu))
             )
 
         return items
 
-    def _build_sessions_submenu(self) -> pystray.Menu:
-        """Build the sessions submenu dynamically with recent sessions."""
-        sessions = self._get_recent_sessions()
+    def _build_conversation_submenu(self, info: dict) -> list:
+        """Build submenu for a single conversation: open folder, reprocess."""
+        session_path = info["path"]
+        status = info["status"]
+        is_current = info["name"] == self._transcribing_session
 
-        if not sessions:
-            return pystray.Menu(
-                pystray.MenuItem("No recordings yet", action=None, enabled=False),
-            )
+        items = [
+            pystray.MenuItem(
+                "Open folder",
+                self._make_session_opener(session_path),
+            ),
+        ]
 
-        items = []
-        for info in sessions:
-            # Status icon
-            status = info["status"]
-            if status == "transcribed":
-                icon_str = "✓"
-            elif status == "processing" or info["name"] == self._transcribing_session:
-                icon_str = "⏳"
-            elif status == "failed":
-                icon_str = "✗"
-            else:
-                icon_str = "○"
-
-            # Build label
-            duration = info.get("duration", "?")
-            segments = info.get("segments")
-            label = f"{icon_str} {info['name']} ({duration})"
-            if segments is not None:
-                label += f" — {segments} segments"
-            elif info["name"] == self._transcribing_session:
-                label += " — transcribing..."
-
+        # Reprocess option — available if not currently transcribing this one
+        can_reprocess = not is_current and not self._transcribing
+        if status in ("transcribed", "failed", "processing", "recorded"):
+            reprocess_label = f"Reprocess with {self._model}"
             items.append(
                 pystray.MenuItem(
-                    label,
-                    self._make_session_opener(info["path"]),
-                )
+                    reprocess_label,
+                    self._make_reprocess_action(session_path),
+                    enabled=can_reprocess,
+                ),
             )
 
-        # Add separator and "Open all" at the bottom
-        items.append(pystray.Menu.SEPARATOR)
-        items.append(pystray.MenuItem("Open recordings folder", self._open_folder))
+        return items
 
-        return pystray.Menu(*items)
-
-    def _get_recent_sessions(self) -> list[dict]:
-        """Get the most recent sessions with their status."""
+    def _get_recent_conversations(self) -> list[dict]:
+        """Get the most recent conversations with their status."""
         if not self._root.exists():
             return []
 
-        sessions = []
+        conversations = []
         try:
             entries = sorted(self._root.iterdir(), reverse=True)  # newest first
             for entry in entries:
                 if entry.is_dir() and (entry / "meta.json").exists():
-                    sessions.append(_get_session_info(entry))
-                    if len(sessions) >= MAX_SESSIONS_IN_MENU:
+                    conversations.append(_get_conversation_info(entry))
+                    if len(conversations) >= MAX_CONVERSATIONS_IN_MENU:
                         break
         except OSError:
             pass
 
-        return sessions
+        return conversations
 
     def _make_session_opener(self, session_path: Path):
         """Create a callback to open a specific session folder."""
@@ -321,6 +305,35 @@ class TrayApp:
             else:
                 subprocess.Popen(["xdg-open", str(session_path)])
         return _open
+
+    def _make_reprocess_action(self, session_path: Path):
+        """Create a callback to reprocess transcription for a conversation."""
+        def _reprocess(icon: pystray.Icon, item: pystray.MenuItem) -> None:
+            if self._transcribing:
+                return  # Don't allow if already transcribing
+
+            # Remove existing transcript so it gets reprocessed
+            transcript_json = session_path / "transcript.json"
+            transcript_md = session_path / "transcript.md"
+            transcribe_log = session_path / "transcribe.log"
+
+            for f in [transcript_json, transcript_md, transcribe_log]:
+                if f.exists():
+                    f.unlink()
+
+            # Start transcription in background with current model
+            self._transcribing = True
+            self._transcribing_session = session_path.name
+            self._transcription_status = f"⏳ Reprocessing {session_path.name} ({self._model})..."
+            self._update_icon()
+
+            thread = threading.Thread(
+                target=self._transcribe_background, args=(session_path,), daemon=True
+            )
+            thread.start()
+            print(f"reprocessing {session_path.name} with model {self._model}", file=sys.stderr)
+
+        return _reprocess
 
     # --- Dynamic menu text callbacks ---
 
@@ -472,7 +485,7 @@ class TrayApp:
             self._stop_ticker.wait(1)
 
     def _update_icon(self) -> None:
-        """Refresh icon image and rebuild menu (so sessions list updates)."""
+        """Refresh icon image and rebuild menu (so conversations list updates)."""
         if self._icon is None:
             return
         self._icon.icon = _create_icon_image(
