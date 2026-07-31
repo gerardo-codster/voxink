@@ -2,7 +2,7 @@
 
 Provides a menu-bar icon (macOS) / system tray icon (Windows) to control
 recording without the CLI. Start/stop recording, select transcription model,
-view transcription progress, open the recordings folder, and quit.
+view sessions and transcription progress, open the recordings folder, and quit.
 
 Uses pystray for cross-platform tray support:
 - macOS: NSStatusItem (menu bar)
@@ -12,6 +12,7 @@ Uses pystray for cross-platform tray support:
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
@@ -34,6 +35,9 @@ AVAILABLE_MODELS = [
     ("medium", "~1.5 GB — lento, muy buena calidad"),
     ("large-v3", "~3 GB — más lento, calidad excelente"),
 ]
+
+# Max sessions to show in the menu
+MAX_SESSIONS_IN_MENU = 10
 
 
 def _create_icon_image(
@@ -69,6 +73,47 @@ def _create_icon_image(
     return img
 
 
+def _get_session_info(session_dir: Path) -> dict:
+    """Get info about a session for display in the menu."""
+    meta_path = session_dir / "meta.json"
+    transcript_path = session_dir / "transcript.json"
+    transcribe_log = session_dir / "transcribe.log"
+
+    info = {"name": session_dir.name, "path": session_dir, "status": "recorded"}
+
+    # Determine status
+    if transcript_path.exists():
+        info["status"] = "transcribed"
+        # Count segments
+        try:
+            data = json.loads(transcript_path.read_text(encoding="utf-8"))
+            seg_count = len(data.get("segments", []))
+            info["segments"] = seg_count
+        except Exception:
+            pass
+    elif transcribe_log.exists():
+        # Check if it's currently being processed (log exists but no transcript)
+        log_content = transcribe_log.read_text(encoding="utf-8")
+        if "done —" in log_content or "failed" in log_content:
+            info["status"] = "failed"
+        else:
+            info["status"] = "processing"
+
+    # Get duration from meta
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            duration = meta.get("duration_seconds", 0)
+            m, s = divmod(duration, 60)
+            info["duration"] = f"{m}:{s:02d}"
+        except Exception:
+            info["duration"] = "?"
+    else:
+        info["duration"] = "?"
+
+    return info
+
+
 class TrayApp:
     """System tray application controller."""
 
@@ -88,6 +133,7 @@ class TrayApp:
         self._session: RecordingSession | None = None
         self._recording = False
         self._transcribing = False
+        self._transcribing_session: str = ""  # Name of session being transcribed
         self._mic_enabled = True  # Toggle: record mic or only system audio
         self._elapsed_str = ""
         self._transcription_status = ""
@@ -129,6 +175,11 @@ class TrayApp:
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
+                "Sessions",
+                self._build_sessions_submenu,
+            ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(
                 self._mic_text,
                 self._toggle_mic,
                 enabled=self._mic_toggle_enabled,
@@ -156,6 +207,79 @@ class TrayApp:
                 self._quit,
             ),
         )
+
+    def _build_sessions_submenu(self) -> pystray.Menu:
+        """Build the sessions submenu dynamically with recent sessions."""
+        sessions = self._get_recent_sessions()
+
+        if not sessions:
+            return pystray.Menu(
+                pystray.MenuItem("No recordings yet", action=None, enabled=False),
+            )
+
+        items = []
+        for info in sessions:
+            # Status icon
+            status = info["status"]
+            if status == "transcribed":
+                icon_str = "✓"
+            elif status == "processing" or info["name"] == self._transcribing_session:
+                icon_str = "⏳"
+            elif status == "failed":
+                icon_str = "✗"
+            else:
+                icon_str = "○"
+
+            # Build label
+            duration = info.get("duration", "?")
+            segments = info.get("segments")
+            label = f"{icon_str} {info['name']} ({duration})"
+            if segments is not None:
+                label += f" — {segments} segments"
+            elif info["name"] == self._transcribing_session:
+                label += " — transcribing..."
+
+            items.append(
+                pystray.MenuItem(
+                    label,
+                    self._make_session_opener(info["path"]),
+                )
+            )
+
+        # Add separator and "Open all" at the bottom
+        items.append(pystray.Menu.SEPARATOR)
+        items.append(pystray.MenuItem("Open recordings folder", self._open_folder))
+
+        return pystray.Menu(*items)
+
+    def _get_recent_sessions(self) -> list[dict]:
+        """Get the most recent sessions with their status."""
+        if not self._root.exists():
+            return []
+
+        sessions = []
+        try:
+            entries = sorted(self._root.iterdir(), reverse=True)  # newest first
+            for entry in entries:
+                if entry.is_dir() and (entry / "meta.json").exists():
+                    sessions.append(_get_session_info(entry))
+                    if len(sessions) >= MAX_SESSIONS_IN_MENU:
+                        break
+        except OSError:
+            pass
+
+        return sessions
+
+    def _make_session_opener(self, session_path: Path):
+        """Create a callback to open a specific session folder."""
+        def _open(icon: pystray.Icon, item: pystray.MenuItem) -> None:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", str(session_path)])
+            elif sys.platform == "win32":
+                subprocess.Popen(["explorer", str(session_path)])
+            else:
+                subprocess.Popen(["xdg-open", str(session_path)])
+        return _open
 
     # --- Dynamic menu text callbacks ---
 
@@ -244,6 +368,7 @@ class TrayApp:
         # Transcribe in background
         if config.transcription_enabled():
             self._transcribing = True
+            self._transcribing_session = session_dir.name
             self._transcription_status = f"⏳ Transcribing {session_dir.name} ({self._model})..."
             self._update_icon()
             thread = threading.Thread(
@@ -261,6 +386,7 @@ class TrayApp:
             print(f"transcription error: {exc}", file=sys.stderr)
 
         self._transcribing = False
+        self._transcribing_session = ""
         self._update_icon()
 
         # Clear status after 15 seconds
