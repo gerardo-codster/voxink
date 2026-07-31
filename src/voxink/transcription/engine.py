@@ -105,17 +105,38 @@ class WhisperEngine:
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-        segments_iter, info = self._model.transcribe(
-            str(audio_path),
-            language=language,
-            beam_size=5,
-            word_timestamps=True,
-            vad_filter=True,
-            vad_parameters=dict(
-                min_silence_duration_ms=500,
-                speech_pad_ms=200,
-            ),
-        )
+        # Try with VAD filter first; if the VAD model file is missing
+        # (common in PyInstaller builds), fall back to no VAD
+        try:
+            segments_iter, info = self._model.transcribe(
+                str(audio_path),
+                language=language,
+                beam_size=5,
+                word_timestamps=True,
+                vad_filter=True,
+                vad_parameters=dict(
+                    min_silence_duration_ms=500,
+                    speech_pad_ms=200,
+                ),
+            )
+            # Force evaluation to trigger any lazy errors
+            segments_list = list(segments_iter)
+        except Exception as vad_err:
+            if "NO_SUCHFILE" in str(vad_err) or "silero_vad" in str(vad_err):
+                print(
+                    f"transcription: VAD model unavailable, transcribing without VAD filter",
+                    file=sys.stderr,
+                )
+                segments_iter, info = self._model.transcribe(
+                    str(audio_path),
+                    language=language,
+                    beam_size=5,
+                    word_timestamps=True,
+                    vad_filter=False,
+                )
+                segments_list = list(segments_iter)
+            else:
+                raise
 
         print(
             f"transcription: {audio_path.name} — detected language {info.language} "
@@ -124,7 +145,7 @@ class WhisperEngine:
         )
 
         result: list[TranscriptSegment] = []
-        for segment in segments_iter:
+        for segment in segments_list:
             text = segment.text.strip()
             if text:
                 result.append(TranscriptSegment(

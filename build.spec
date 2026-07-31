@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec file for quill-recorder.
+"""PyInstaller spec file for Voxink.
 
-Builds a single-file executable that includes Python, all dependencies,
+Builds a standalone application that includes Python, all dependencies,
 and the application code. Users don't need Python installed.
 
 Usage:
@@ -9,22 +9,33 @@ Usage:
     pyinstaller build.spec
 
 Output:
-    dist/quill-recorder      (macOS)
-    dist/quill-recorder.exe  (Windows)
+    dist/Voxink.app   (macOS)
+    dist/voxink.exe   (Windows)
 """
 
 import sys
 from pathlib import Path
+import importlib.util
 
 block_cipher = None
+
+# Find faster_whisper assets (VAD model) to include in the bundle
+_fw_spec = importlib.util.find_spec('faster_whisper')
+_fw_assets = []
+if _fw_spec and _fw_spec.origin:
+    _fw_dir = Path(_fw_spec.origin).parent
+    _assets_dir = _fw_dir / 'assets'
+    if _assets_dir.exists():
+        _fw_assets = [(str(_assets_dir), 'faster_whisper/assets')]
 
 a = Analysis(
     ['src/voxink/main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=_fw_assets,
     hiddenimports=[
         'faster_whisper',
+        'faster_whisper.vad',
         'ctranslate2',
         'onnxruntime',
         'sounddevice',
