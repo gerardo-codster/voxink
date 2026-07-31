@@ -17,19 +17,28 @@ from voxink.audio import MicRecorder, SystemAudioRecorder
 class RecordingSession:
     """One meeting recording: a timestamped folder with mic and system tracks."""
 
-    def __init__(self, root: Path, system_device: int | str | None = None, mic_enabled: bool = True) -> None:
-        """Create a session folder under `root` (yyyy.MM.dd-HHmm).
+    def __init__(self, root: Path, system_device: int | str | None = None, mic_enabled: bool = True, name: str | None = None) -> None:
+        """Create a session folder under `root`.
 
         Args:
             root: Parent directory for recordings.
             system_device: System audio device index or name.
             mic_enabled: Whether to record the microphone. If False, only system audio is captured.
+            name: Optional custom name for the session. If None, uses timestamp (yyyy.MM.dd-HHmm).
         """
         self.started_at = datetime.now(timezone.utc)
         self.root = root
         self._mic_enabled = mic_enabled
 
-        base = self.started_at.strftime("%Y.%m.%d-%H%M")
+        # Build folder name: custom name or timestamp
+        timestamp = self.started_at.strftime("%Y.%m.%d-%H%M")
+        if name:
+            # Sanitize: remove characters not safe for folder names
+            safe_name = "".join(c for c in name if c not in r'\/:*?"<>|').strip()
+            base = f"{timestamp} — {safe_name}" if safe_name else timestamp
+        else:
+            base = timestamp
+
         candidate = root / base
         n = 2
         while candidate.exists():

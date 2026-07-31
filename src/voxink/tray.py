@@ -381,15 +381,60 @@ class TrayApp:
         else:
             self._start_recording()
 
+    def _prompt_recording_name(self) -> str | None:
+        """Show a native dialog asking for a recording name.
+
+        Returns the name entered, or None if cancelled/empty (use default).
+        macOS: uses osascript. Windows: uses a simple tkinter dialog.
+        """
+        if sys.platform == "darwin":
+            script = (
+                'set dialogResult to display dialog "Recording name (leave empty for default):" '
+                'default answer "" with title "Voxink" '
+                'buttons {"Cancel", "Start"} default button "Start"\n'
+                'return text returned of dialogResult'
+            )
+            try:
+                result = subprocess.run(
+                    ["/usr/bin/osascript", "-e", script],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if result.returncode == 0:
+                    name = result.stdout.strip()
+                    return name if name else None
+            except (subprocess.TimeoutExpired, Exception):
+                pass
+            return None
+        elif sys.platform == "win32":
+            try:
+                import tkinter as tk
+                from tkinter import simpledialog
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes("-topmost", True)
+                name = simpledialog.askstring(
+                    "Voxink", "Recording name (leave empty for default):", parent=root
+                )
+                root.destroy()
+                return name if name and name.strip() else None
+            except Exception:
+                return None
+        else:
+            return None
+
     def _start_recording(self) -> None:
         if self._recording:
             return
+
+        # Ask for a recording name (dialog). Empty/cancel = use default timestamp
+        name = self._prompt_recording_name()
 
         try:
             self._session = RecordingSession(
                 root=self._root,
                 system_device=self._system_device,
                 mic_enabled=self._mic_enabled,
+                name=name,
             )
             self._session.start()
         except RuntimeError as exc:
