@@ -12,7 +12,9 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
+import soundfile as sf
 from faster_whisper import WhisperModel
 
 
@@ -23,6 +25,10 @@ class TranscriptSegment:
     start: float  # seconds from track start
     end: float  # seconds from track start
     text: str
+
+
+# Progress callback signature: (percent: int, last_segment_end: float, total_duration: float)
+ProgressCallback = Callable[[int, float, float], None]
 
 
 class WhisperEngine:
@@ -89,12 +95,19 @@ class WhisperEngine:
         )
         print("transcription: model ready", file=sys.stderr)
 
-    def transcribe(self, audio_path: Path, language: str = "es") -> list[TranscriptSegment]:
+    def transcribe(
+        self,
+        audio_path: Path,
+        language: str = "es",
+        on_progress: ProgressCallback | None = None,
+    ) -> list[TranscriptSegment]:
         """Transcribe an audio file, returning timed segments.
 
         Args:
             audio_path: Path to WAV file.
             language: Language code (default "es" for Spanish).
+            on_progress: Optional callback called as transcription advances.
+                         Receives (percent, last_end_seconds, total_seconds).
 
         Returns:
             List of TranscriptSegment with start/end times and text.
@@ -104,6 +117,14 @@ class WhisperEngine:
 
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+        # Get audio duration for progress reporting
+        total_duration = 0.0
+        try:
+            with sf.SoundFile(str(audio_path)) as f:
+                total_duration = f.frames / f.samplerate
+        except Exception:
+            pass
 
         # Try with VAD filter first; if the VAD model file is missing
         # (common in PyInstaller builds), fall back to no VAD
@@ -119,12 +140,14 @@ class WhisperEngine:
                     speech_pad_ms=200,
                 ),
             )
-            # Force evaluation to trigger any lazy errors
-            segments_list = list(segments_iter)
+            # Iterate with progress tracking
+            segments_list = self._collect_with_progress(
+                segments_iter, total_duration, on_progress
+            )
         except Exception as vad_err:
             if "NO_SUCHFILE" in str(vad_err) or "silero_vad" in str(vad_err):
                 print(
-                    f"transcription: VAD model unavailable, transcribing without VAD filter",
+                    "transcription: VAD model unavailable, transcribing without VAD filter",
                     file=sys.stderr,
                 )
                 segments_iter, info = self._model.transcribe(
@@ -134,7 +157,9 @@ class WhisperEngine:
                     word_timestamps=True,
                     vad_filter=False,
                 )
-                segments_list = list(segments_iter)
+                segments_list = self._collect_with_progress(
+                    segments_iter, total_duration, on_progress
+                )
             else:
                 raise
 
@@ -154,7 +179,28 @@ class WhisperEngine:
                     text=text,
                 ))
 
+        # Final progress
+        if on_progress and total_duration > 0:
+            on_progress(100, total_duration, total_duration)
+
         return result
+
+    def _collect_with_progress(self, segments_iter, total_duration: float, on_progress):
+        """Collect segments from iterator while reporting progress."""
+        segments_list = []
+        last_reported_pct = -1
+
+        for segment in segments_iter:
+            segments_list.append(segment)
+
+            # Report progress based on how far into the audio we've reached
+            if on_progress and total_duration > 0:
+                pct = min(99, int((segment.end / total_duration) * 100))
+                if pct > last_reported_pct:
+                    last_reported_pct = pct
+                    on_progress(pct, segment.end, total_duration)
+
+        return segments_list
 
     def release(self) -> None:
         """Release model memory."""

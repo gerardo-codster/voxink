@@ -155,6 +155,9 @@ class TrayApp:
 
     def _build_menu(self) -> pystray.Menu:
         """Build the context menu."""
+        # Build sessions submenu items
+        sessions_items = self._get_sessions_menu_items()
+
         return pystray.Menu(
             pystray.MenuItem(
                 self._status_text,
@@ -176,7 +179,7 @@ class TrayApp:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
                 "Sessions",
-                self._build_sessions_submenu,
+                pystray.Menu(*sessions_items),
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
@@ -207,6 +210,44 @@ class TrayApp:
                 self._quit,
             ),
         )
+
+    def _get_sessions_menu_items(self) -> list:
+        """Build session menu items for the Sessions submenu."""
+        sessions = self._get_recent_sessions()
+
+        if not sessions:
+            return [pystray.MenuItem("No recordings yet", action=None, enabled=False)]
+
+        items = []
+        for info in sessions:
+            # Status icon
+            status = info["status"]
+            if status == "transcribed":
+                icon_str = "✓"
+            elif status == "processing" or info["name"] == self._transcribing_session:
+                icon_str = "⏳"
+            elif status == "failed":
+                icon_str = "✗"
+            else:
+                icon_str = "○"
+
+            # Build label
+            duration = info.get("duration", "?")
+            segments = info.get("segments")
+            label = f"{icon_str} {info['name']} ({duration})"
+            if segments is not None:
+                label += f" — {segments} seg"
+            elif info["name"] == self._transcribing_session:
+                label += " — transcribing..."
+
+            items.append(
+                pystray.MenuItem(
+                    label,
+                    self._make_session_opener(info["path"]),
+                )
+            )
+
+        return items
 
     def _build_sessions_submenu(self) -> pystray.Menu:
         """Build the sessions submenu dynamically with recent sessions."""
@@ -379,7 +420,16 @@ class TrayApp:
     def _transcribe_background(self, session_dir: Path) -> None:
         """Run transcription in a background thread."""
         try:
-            transcribe_session(session_dir, language=self._language, model=self._model)
+            def _on_progress(pct: int, track_name: str) -> None:
+                self._transcription_status = f"⏳ {session_dir.name} — {track_name} {pct}%"
+                self._update_icon()
+
+            transcribe_session(
+                session_dir,
+                language=self._language,
+                model=self._model,
+                on_progress=_on_progress,
+            )
             self._transcription_status = f"✓ {session_dir.name} — transcription complete"
         except Exception as exc:
             self._transcription_status = f"✗ {session_dir.name} — failed: {exc}"
@@ -422,12 +472,13 @@ class TrayApp:
             self._stop_ticker.wait(1)
 
     def _update_icon(self) -> None:
-        """Refresh icon image and menu."""
+        """Refresh icon image and rebuild menu (so sessions list updates)."""
         if self._icon is None:
             return
         self._icon.icon = _create_icon_image(
             recording=self._recording, transcribing=self._transcribing
         )
+        self._icon.menu = self._build_menu()
         self._icon.update_menu()
 
 

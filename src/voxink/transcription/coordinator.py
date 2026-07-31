@@ -17,7 +17,12 @@ from voxink import config
 from voxink.transcription.engine import TranscriptSegment, WhisperEngine
 
 
-def transcribe_session(session_dir: Path, language: str | None = None, model: str | None = None) -> None:
+def transcribe_session(
+    session_dir: Path,
+    language: str | None = None,
+    model: str | None = None,
+    on_progress: callable | None = None,
+) -> None:
     """Transcribe a single session directory.
 
     Reads meta.json to find tracks, transcribes each, merges by timestamp,
@@ -27,6 +32,7 @@ def transcribe_session(session_dir: Path, language: str | None = None, model: st
         session_dir: Path to the session folder.
         language: Language code (default from config).
         model: Whisper model size (default from config).
+        on_progress: Optional callback (percent, track_name) called during transcription.
     """
     lang = language or config.language()
     meta_path = session_dir / "meta.json"
@@ -67,8 +73,12 @@ def transcribe_session(session_dir: Path, language: str | None = None, model: st
         speaker = track_speakers.get(track_key, track_key)
         _log(session_dir, f"transcribing {filename} ({engine.name}/{engine.model}) → {speaker}")
 
+        def _track_progress(pct: int, pos: float, total: float) -> None:
+            if on_progress:
+                on_progress(pct, filename)
+
         try:
-            segments = engine.transcribe(audio_path, language=lang)
+            segments = engine.transcribe(audio_path, language=lang, on_progress=_track_progress)
         except Exception as exc:
             _log(session_dir, f"failed to transcribe {filename}: {exc}")
             continue
