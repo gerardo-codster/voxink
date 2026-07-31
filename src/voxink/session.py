@@ -46,14 +46,19 @@ class RecordingSession:
     def start(self) -> None:
         """Start recording tracks (system always, mic if enabled)."""
         system_path = self.dir / "system.wav"
+        system_ok = False
 
         # Start system audio
         try:
             self._system.start(system_path, device=self._system_device)
+            system_ok = True
         except RuntimeError as exc:
             print(f"warning: system audio unavailable: {exc}", file=sys.stderr)
             if not self._mic_enabled:
-                raise RuntimeError(f"System audio failed and mic is disabled: {exc}") from exc
+                raise RuntimeError(
+                    "No audio source available. System audio device not found and microphone is disabled.\n"
+                    "Enable the microphone, or configure a system audio device (BlackHole on macOS)."
+                ) from exc
             print("recording mic only", file=sys.stderr)
 
         # Start mic if enabled
@@ -62,10 +67,11 @@ class RecordingSession:
             try:
                 self._mic.start(mic_path)
             except Exception as exc:
-                self._system.stop()
+                if system_ok:
+                    self._system.stop()
                 raise RuntimeError(f"Mic recording failed: {exc}") from exc
 
-        mode = "mic + system" if self._mic_enabled else "system only"
+        mode = "mic + system" if self._mic_enabled and system_ok else ("system only" if not self._mic_enabled else "mic only")
         print(f"● recording ({mode}) → {self.dir}", file=sys.stderr)
 
     def stop(self) -> None:

@@ -46,8 +46,8 @@ def find_loopback_device() -> dict | None:
                 dev = devices[default_output]
                 return {"index": default_output, "name": dev["name"], "method": "wasapi_loopback"}
 
-    # On macOS, look for virtual audio devices
-    loopback_names = ["blackhole", "soundflower", "loopback", "virtual"]
+    # On macOS, look for virtual audio devices or app-specific audio devices
+    loopback_names = ["blackhole", "soundflower", "loopback", "virtual", "teams audio", "zoom audio", "obs"]
     for i, dev in enumerate(devices):
         if dev["max_input_channels"] > 0:
             name_lower = dev["name"].lower()

@@ -395,6 +395,11 @@ class TrayApp:
         except RuntimeError as exc:
             print(f"recording failed: {exc}", file=sys.stderr)
             self._session = None
+            # Show error in the menu for the user to see
+            self._transcription_status = f"✗ {exc}"
+            self._update_icon()
+            # Clear error after 10 seconds
+            threading.Thread(target=self._clear_status_later, args=(10,), daemon=True).start()
             return
 
         self._recording = True
@@ -483,6 +488,12 @@ class TrayApp:
             self._elapsed_str = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
             self._update_icon()
             self._stop_ticker.wait(1)
+
+    def _clear_status_later(self, seconds: int) -> None:
+        """Clear the transcription status after a delay."""
+        time.sleep(seconds)
+        self._transcription_status = ""
+        self._update_icon()
 
     def _update_icon(self) -> None:
         """Refresh icon image and rebuild menu (so conversations list updates)."""
