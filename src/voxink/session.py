@@ -94,6 +94,15 @@ class RecordingSession:
 
         ended = datetime.now(timezone.utc)
 
+        # Warn if system audio was pure silence
+        if self._system.first_buffer_at is not None and not self._system.has_audio:
+            print(
+                "warning: system audio track is silent — the device may not be capturing real audio.\n"
+                "  On macOS, 'Microsoft Teams Audio' only works during active Teams calls.\n"
+                "  For general system audio capture, install BlackHole: brew install blackhole-2ch",
+                file=sys.stderr,
+            )
+
         # Compute offsets — how far each track lags behind the earliest
         mic_start = self._mic.first_buffer_at or self.started_at
         system_start = self._system.first_buffer_at or self.started_at
@@ -114,10 +123,14 @@ class RecordingSession:
             )
 
         if self._system.is_recording or self._system.first_buffer_at is not None:
-            meta["files"]["system"] = "system.wav"
-            meta["start_offset_ms"]["system"] = int(
-                (system_start - earliest).total_seconds() * 1000
-            )
+            # Only include system track if it actually has audio
+            if self._system.has_audio:
+                meta["files"]["system"] = "system.wav"
+                meta["start_offset_ms"]["system"] = int(
+                    (system_start - earliest).total_seconds() * 1000
+                )
+            else:
+                meta["system_silent"] = True
 
         # Always write mic if file exists
         mic_file = self.dir / "mic.wav"

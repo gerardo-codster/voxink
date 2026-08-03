@@ -47,7 +47,7 @@ def find_loopback_device() -> dict | None:
                 return {"index": default_output, "name": dev["name"], "method": "wasapi_loopback"}
 
     # On macOS, look for virtual audio devices or app-specific audio devices
-    loopback_names = ["blackhole", "soundflower", "loopback", "virtual", "teams audio", "zoom audio", "obs"]
+    loopback_names = ["blackhole", "soundflower", "loopback", "virtual", "zoom audio", "obs"]
     for i, dev in enumerate(devices):
         if dev["max_input_channels"] > 0:
             name_lower = dev["name"].lower()
@@ -71,6 +71,8 @@ class SystemAudioRecorder:
         self._lock = threading.Lock()
         self.first_buffer_at: datetime | None = None
         self._device_info: dict | None = None
+        self._has_audio = False  # True if any non-silent buffer was received
+        self._frames_checked = 0
 
     @property
     def is_recording(self) -> bool:
@@ -79,6 +81,11 @@ class SystemAudioRecorder:
     @property
     def device_name(self) -> str | None:
         return self._device_info["name"] if self._device_info else None
+
+    @property
+    def has_audio(self) -> bool:
+        """Whether any non-silent audio was captured."""
+        return self._has_audio
 
     def start(
         self,
@@ -145,6 +152,8 @@ class SystemAudioRecorder:
             subtype="PCM_16",
         )
         self.first_buffer_at = None
+        self._has_audio = False
+        self._frames_checked = 0
 
         def _callback(indata: np.ndarray, frames: int, time_info: object, status: object) -> None:
             if status:
@@ -154,6 +163,11 @@ class SystemAudioRecorder:
                     if self.first_buffer_at is None:
                         self.first_buffer_at = datetime.now(timezone.utc)
                     self._file.write(indata.copy())
+                    # Check for non-silence in the first ~5 seconds
+                    if not self._has_audio and self._frames_checked < samplerate * 5:
+                        self._frames_checked += frames
+                        if np.any(indata != 0):
+                            self._has_audio = True
 
         extra_settings = None
         # On Windows, enable WASAPI loopback mode

@@ -70,6 +70,11 @@ def transcribe_session(
             _log(session_dir, f"skipping empty track {filename}")
             continue
 
+        # Skip silent files (pure zeros = no real audio captured)
+        if _is_silent(audio_path):
+            _log(session_dir, f"skipping silent track {filename} — no audio detected")
+            continue
+
         speaker = track_speakers.get(track_key, track_key)
         _log(session_dir, f"transcribing {filename} ({engine.name}/{engine.model}) → {speaker}")
 
@@ -181,3 +186,44 @@ def _log(session_dir: Path, message: str) -> None:
     log_path = session_dir / "transcribe.log"
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(line)
+
+
+def _is_silent(audio_path: Path, check_seconds: int = 10) -> bool:
+    """Check if an audio file is pure silence (all zeros).
+
+    Samples the beginning, middle, and end of the file.
+    Returns True if all sampled sections are silent.
+    """
+    try:
+        import numpy as np
+        import soundfile as sf
+
+        with sf.SoundFile(str(audio_path)) as f:
+            if f.frames == 0:
+                return True
+
+            sr = f.samplerate
+            samples_to_check = sr * check_seconds
+
+            # Check beginning
+            chunk = f.read(min(samples_to_check, f.frames))
+            if np.any(chunk != 0):
+                return False
+
+            # Check middle
+            if f.frames > samples_to_check * 3:
+                f.seek(f.frames // 2)
+                chunk = f.read(min(samples_to_check, f.frames - f.frames // 2))
+                if np.any(chunk != 0):
+                    return False
+
+            # Check end
+            if f.frames > samples_to_check * 2:
+                f.seek(max(0, f.frames - samples_to_check))
+                chunk = f.read(samples_to_check)
+                if np.any(chunk != 0):
+                    return False
+
+            return True
+    except Exception:
+        return False
